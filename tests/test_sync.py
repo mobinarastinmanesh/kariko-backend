@@ -134,6 +134,72 @@ class TestSyncPush:
         assert task is not None
         assert task.user != user
 
+    def test_push_cannot_hijack_other_users_task_via_update(self, auth_client2, user):
+        task = Task.objects.create(user=user, title="Victim's task")
+        payload = {
+            "changes": {
+                "tasks": {"created": [], "updated": [{"id": str(task.pk), "title": "Hijacked", "done": False, "important": False, "my_day": False, "sort_order": 0}], "deleted": []},
+                "steps": {"created": [], "updated": [], "deleted": []},
+                "lists": {"created": [], "updated": [], "deleted": []},
+            },
+            "last_pulled_at": None,
+        }
+        res = auth_client2.post(SYNC_URL, payload, format="json")
+        assert res.status_code == 200
+        task.refresh_from_db()
+        assert task.title == "Victim's task"
+        assert task.user == user
+
+    def test_push_cannot_hijack_other_users_list_via_update(self, auth_client2, user):
+        lst = TaskList.objects.create(user=user, name="Victim's list", color="#f14254")
+        payload = {
+            "changes": {
+                "tasks": {"created": [], "updated": [], "deleted": []},
+                "steps": {"created": [], "updated": [], "deleted": []},
+                "lists": {"created": [], "updated": [{"id": str(lst.pk), "name": "Hijacked", "color": "#000000", "icon": "", "sort_order": 0}], "deleted": []},
+            },
+            "last_pulled_at": None,
+        }
+        res = auth_client2.post(SYNC_URL, payload, format="json")
+        assert res.status_code == 200
+        lst.refresh_from_db()
+        assert lst.name == "Victim's list"
+        assert lst.user == user
+
+    def test_push_cannot_hijack_other_users_step_via_update(self, auth_client2, user, user2):
+        task = Task.objects.create(user=user, title="Victim's task")
+        step = Step.objects.create(task=task, title="Victim's step")
+        own_task = Task.objects.create(user=user2, title="Attacker's task")
+        payload = {
+            "changes": {
+                "tasks": {"created": [], "updated": [], "deleted": []},
+                "steps": {"created": [], "updated": [{"id": str(step.pk), "task_id": str(own_task.pk), "title": "Hijacked", "done": False, "sort_order": 0}], "deleted": []},
+                "lists": {"created": [], "updated": [], "deleted": []},
+            },
+            "last_pulled_at": None,
+        }
+        res = auth_client2.post(SYNC_URL, payload, format="json")
+        assert res.status_code == 200
+        step.refresh_from_db()
+        assert step.title == "Victim's step"
+        assert step.task_id == task.id
+
+    def test_push_task_ignores_list_id_owned_by_another_user(self, auth_client2, user, user2):
+        victims_list = TaskList.objects.create(user=user, name="Victim's list", color="#f14254")
+        task_id = _make_id()
+        payload = {
+            "changes": {
+                "tasks": {"created": [{"id": task_id, "title": "Sneaky", "done": False, "important": False, "my_day": False, "list_id": str(victims_list.pk), "sort_order": 0}], "updated": [], "deleted": []},
+                "steps": {"created": [], "updated": [], "deleted": []},
+                "lists": {"created": [], "updated": [], "deleted": []},
+            },
+            "last_pulled_at": None,
+        }
+        res = auth_client2.post(SYNC_URL, payload, format="json")
+        assert res.status_code == 200
+        task = Task.objects.get(id=task_id)
+        assert task.task_list_id is None
+
     def test_push_idempotent_create(self, auth_client, user):
         task_id = _make_id()
         payload = {

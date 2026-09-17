@@ -152,18 +152,15 @@ class SyncView(APIView):
         return Response({"ok": True}, status=status.HTTP_200_OK)
 
     def _apply_lists(self, changes, user):
-        for raw in changes.get("created", []):
-            TaskList.objects.get_or_create(
-                id=raw["id"],
-                defaults={
-                    "user": user,
-                    "name": raw.get("name", ""),
-                    "color": raw.get("color", "#8b8580"),
-                    "icon": raw.get("icon", ""),
-                    "sort_order": raw.get("sort_order", 0),
-                },
-            )
-        for raw in changes.get("updated", []):
+        for raw in changes.get("created", []) + changes.get("updated", []):
+            # An id collision with a record owned by a different user must never
+            # let this request take it over — ignore it instead of reassigning
+            # ownership. This can legitimately happen when a device that was
+            # previously logged into another account still has stale local
+            # records queued for push.
+            existing = TaskList.objects.filter(id=raw["id"]).first()
+            if existing and existing.user_id != user.id:
+                continue
             TaskList.objects.update_or_create(
                 id=raw["id"],
                 defaults={
@@ -179,22 +176,15 @@ class SyncView(APIView):
         ).update(is_deleted=True)
 
     def _apply_tasks(self, changes, user):
-        for raw in changes.get("created", []):
-            Task.objects.get_or_create(
-                id=raw["id"],
-                defaults={
-                    "user": user,
-                    "title": raw.get("title", ""),
-                    "notes": raw.get("notes", ""),
-                    "done": raw.get("done", False),
-                    "important": raw.get("important", False),
-                    "my_day": raw.get("my_day", False),
-                    "due_date": raw.get("due_date") or None,
-                    "task_list_id": raw.get("list_id") or None,
-                    "sort_order": raw.get("sort_order", 0),
-                },
-            )
-        for raw in changes.get("updated", []):
+        for raw in changes.get("created", []) + changes.get("updated", []):
+            existing = Task.objects.filter(id=raw["id"]).first()
+            if existing and existing.user_id != user.id:
+                continue
+            # A referenced list must also belong to this user, otherwise drop
+            # the reference rather than linking a task into someone else's list.
+            list_id = raw.get("list_id") or None
+            if list_id and not TaskList.objects.filter(id=list_id, user=user).exists():
+                list_id = None
             Task.objects.update_or_create(
                 id=raw["id"],
                 defaults={
@@ -205,7 +195,7 @@ class SyncView(APIView):
                     "important": raw.get("important", False),
                     "my_day": raw.get("my_day", False),
                     "due_date": raw.get("due_date") or None,
-                    "task_list_id": raw.get("list_id") or None,
+                    "task_list_id": list_id,
                     "sort_order": raw.get("sort_order", 0),
                 },
             )
@@ -214,30 +204,22 @@ class SyncView(APIView):
         ).update(is_deleted=True)
 
     def _apply_steps(self, changes, user):
-        for raw in changes.get("created", []):
+        for raw in changes.get("created", []) + changes.get("updated", []):
             task = Task.objects.filter(id=raw.get("task_id"), user=user).first()
-            if task:
-                Step.objects.get_or_create(
-                    id=raw["id"],
-                    defaults={
-                        "task": task,
-                        "title": raw.get("title", ""),
-                        "done": raw.get("done", False),
-                        "sort_order": raw.get("sort_order", 0),
-                    },
-                )
-        for raw in changes.get("updated", []):
-            task = Task.objects.filter(id=raw.get("task_id"), user=user).first()
-            if task:
-                Step.objects.update_or_create(
-                    id=raw["id"],
-                    defaults={
-                        "task": task,
-                        "title": raw.get("title", ""),
-                        "done": raw.get("done", False),
-                        "sort_order": raw.get("sort_order", 0),
-                    },
-                )
+            if not task:
+                continue
+            existing = Step.objects.select_related("task").filter(id=raw["id"]).first()
+            if existing and existing.task.user_id != user.id:
+                continue
+            Step.objects.update_or_create(
+                id=raw["id"],
+                defaults={
+                    "task": task,
+                    "title": raw.get("title", ""),
+                    "done": raw.get("done", False),
+                    "sort_order": raw.get("sort_order", 0),
+                },
+            )
         Step.objects.filter(
             id__in=changes.get("deleted", []), task__user=user
         ).update(is_deleted=True)
